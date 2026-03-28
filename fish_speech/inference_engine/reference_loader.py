@@ -34,7 +34,9 @@ class ReferenceLoader:
         self.encode_reference: Callable
 
         # Define the torchaudio backend
-        # list_audio_backends() was removed in torchaudio 2.9
+        # torchaudio 2.9+ removed list_audio_backends(), and 2.11+ defaults
+        # to torchcodec which may not be installed. Use soundfile as the
+        # reliable cross-platform fallback.
         try:
             backends = torchaudio.list_audio_backends()
             if "ffmpeg" in backends:
@@ -42,16 +44,7 @@ class ReferenceLoader:
             else:
                 self.backend = "soundfile"
         except AttributeError:
-            # torchaudio 2.9+ removed list_audio_backends()
-            # Try ffmpeg first, fallback to soundfile
-            try:
-                from importlib import import_module
-
-                import_module("torchaudio.io._load_audio_fileobj")
-
-                self.backend = "ffmpeg"
-            except (ImportError, ModuleNotFoundError):
-                self.backend = "soundfile"
+            self.backend = "soundfile"
 
     @staticmethod
     def _validate_id(id: str) -> None:
