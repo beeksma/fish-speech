@@ -4,6 +4,7 @@ from loguru import logger
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
+from fish_speech.utils.gpu import auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
 from tools.server.inference import inference_wrapper as inference
 
@@ -27,6 +28,9 @@ class ModelManager:
 
         self.precision = torch.half if half else torch.bfloat16
 
+        auto_detect_rocm_gfx()
+        check_vram_and_advise(llama_checkpoint_path)
+
         # Check if MPS or CUDA is available
         if torch.backends.mps.is_available():
             self.device = "mps"
@@ -40,7 +44,7 @@ class ModelManager:
             llama_checkpoint_path, self.device, self.precision, self.compile, self.mode
         )
         self.load_decoder_model(
-            decoder_config_name, decoder_checkpoint_path, self.device
+            decoder_config_name, decoder_checkpoint_path, self.device, self.precision
         )
         self.tts_inference_engine = TTSInferenceEngine(
             llama_queue=self.llama_queue,
@@ -69,11 +73,14 @@ class ModelManager:
 
         logger.info("LLAMA model loaded.")
 
-    def load_decoder_model(self, config_name, checkpoint_path, device) -> None:
+    def load_decoder_model(
+        self, config_name, checkpoint_path, device, precision=None
+    ) -> None:
         self.decoder_model = load_decoder_model(
             config_name=config_name,
             checkpoint_path=checkpoint_path,
             device=device,
+            precision=precision,
         )
         logger.info("Decoder model loaded.")
 
