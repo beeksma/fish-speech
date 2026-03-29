@@ -1,4 +1,5 @@
 import os
+import time
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -10,6 +11,7 @@ pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
+from fish_speech.models.dac.modded_dac import DAC
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
 from fish_speech.utils.gpu import auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
@@ -113,6 +115,23 @@ if __name__ == "__main__":
             )
         )
     )
+
+    # Warm up the DAC decoder with realistic conv kernel shapes.
+    # Voice cloning produces ~300 tokens across 10 codebooks, which triggers
+    # MIOpen exhaustive kernel search for 1D conv shapes on first run (~146s).
+    # Once cached (persisted via Docker volume), subsequent runs take ~4.5s.
+    if isinstance(decoder_model, DAC) and args.device == "cuda":
+        logger.info("Warming up DAC decoder conv kernels (MIOpen kernel search)...")
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            synthetic_indices = torch.randint(
+                0, 1024, (1, 10, 300), device=args.device, dtype=torch.long
+            )
+            _ = decoder_model.from_indices(synthetic_indices)
+            torch.cuda.synchronize()
+        del synthetic_indices, _
+        torch.cuda.empty_cache()
+        logger.info(f"DAC decoder warmup done in {time.perf_counter() - t0:.1f}s")
 
     logger.info("Warming up done, launching the web UI...")
 

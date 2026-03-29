@@ -1,3 +1,4 @@
+import time
 from typing import Callable
 
 import torch
@@ -17,7 +18,14 @@ class VQManager:
         logger.info(f"VQ features: {codes.shape}")
 
         if isinstance(self.decoder_model, DAC):
-            return self.decoder_model.from_indices(codes[None])[0].squeeze()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            result = self.decoder_model.from_indices(codes[None])[0].squeeze()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            logger.info(f"VQ decode: {time.perf_counter() - t0:.3f}s")
+            return result
 
         raise ValueError(f"Unknown model type: {type(self.decoder_model)}")
 
@@ -43,7 +51,13 @@ class VQManager:
 
             # VQ Encoder
             if isinstance(self.decoder_model, DAC):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
                 prompt_tokens = self.decoder_model.encode(audios, audio_lengths)[0][0]
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                logger.info(f"VQ encode: {time.perf_counter() - t0:.3f}s")
                 logger.info(f"Encoded prompt: {prompt_tokens.shape}")
             else:
                 raise ValueError(f"Unknown model type: {type(self.decoder_model)}")
