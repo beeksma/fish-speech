@@ -322,6 +322,11 @@ def generate(
 
     prefill_decode = decode_one_token_ar
 
+    # --- Profiling: prefill ---
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_prefill_start = time.perf_counter()
+
     first_token = prefill_decode(
         model,
         prompt.view(1, codebook_dim, -1),
@@ -335,8 +340,19 @@ def generate(
     )
     seq[:, T : T + 1] = first_token
 
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_prefill_end = time.perf_counter()
+    logger.info(
+        f"Prefill: {T} tokens in {t_prefill_end - t_prefill_start:.3f}s "
+        f"({T / (t_prefill_end - t_prefill_start):.1f} tok/s)"
+    )
+
     # Recreate input_pos
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
+
+    # --- Profiling: decode ---
+    t_decode_start = time.perf_counter()
 
     x = decode_n_tokens(
         model,
@@ -351,6 +367,23 @@ def generate(
         audio_parts=audio_parts,
         decode_one_token=decode_one_token,
     )
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_decode_end = time.perf_counter()
+    n_decoded = x.size(1)
+    decode_time = t_decode_end - t_decode_start
+    logger.info(
+        f"Decode: {n_decoded} tokens in {decode_time:.3f}s "
+        f"({n_decoded / decode_time:.2f} tok/s, "
+        f"{decode_time / n_decoded * 1000:.0f}ms/tok)"
+    )
+    logger.info(
+        f"Total generate: prefill={t_prefill_end - t_prefill_start:.3f}s + "
+        f"decode={decode_time:.3f}s = {t_decode_end - t_prefill_start:.3f}s "
+        f"(prompt_len={T}, generated={n_decoded})"
+    )
+
     seq = seq[:, : T + 1 + x.size(1)]
     seq[:, T + 1 :] = x
 
