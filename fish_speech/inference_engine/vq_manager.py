@@ -13,14 +13,18 @@ from fish_speech.models.dac.modded_dac import DAC
 DECODE_PAD_TO = 512
 
 
-def _pad_decode_truncate(model, codes, device):
+CHUNK_DECODE_PAD_TO = 64  # Smaller pad target for streaming chunks
+
+
+def _pad_decode_truncate(model, codes, device, pad_multiple=DECODE_PAD_TO):
     """Pad codes to consistent shape, decode via DAC, truncate to original length.
 
     Shared by both in-process and subprocess decode paths.
+    pad_multiple: pad to this multiple (512 for batch, 64 for streaming chunks).
     """
     seq_len = codes.shape[-1]
-    pad_to = max(seq_len, DECODE_PAD_TO)
-    pad_to = ((pad_to + DECODE_PAD_TO - 1) // DECODE_PAD_TO) * DECODE_PAD_TO
+    pad_to = max(seq_len, pad_multiple)
+    pad_to = ((pad_to + pad_multiple - 1) // pad_multiple) * pad_multiple
 
     if seq_len < pad_to:
         padded = torch.zeros(
@@ -69,13 +73,15 @@ def _decoder_subprocess_worker(
         logger.info(f"[decoder-subprocess] Loading DAC model on {device}...")
         model = load_model(config_name, checkpoint_path, device=device, precision=precision)
 
-        # Warmup: pre-compile MIOpen solutions on clean GPU
+        # Warmup: pre-compile MIOpen solutions for both batch and chunk shapes
         logger.info("[decoder-subprocess] Warming up MIOpen conv solutions...")
         fake_codes = torch.randint(0, 1024, (10, DECODE_PAD_TO), device=device)
-        _pad_decode_truncate(model, fake_codes, device)
+        _pad_decode_truncate(model, fake_codes, device, pad_multiple=DECODE_PAD_TO)
+        fake_chunk = torch.randint(0, 1024, (10, CHUNK_DECODE_PAD_TO), device=device)
+        _pad_decode_truncate(model, fake_chunk, device, pad_multiple=CHUNK_DECODE_PAD_TO)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        logger.info("[decoder-subprocess] Warmup done")
+        logger.info("[decoder-subprocess] Warmup done (batch + chunk shapes)")
 
         conn.send({"status": "ready", "sample_rate": model.sample_rate})
 
@@ -86,7 +92,8 @@ def _decoder_subprocess_worker(
 
             try:
                 codes = torch.from_numpy(msg["codes"]).to(device=device)
-                result, elapsed, seq_len, pad_to = _pad_decode_truncate(model, codes, device)
+                pad_mult = msg.get("pad_multiple", DECODE_PAD_TO)
+                result, elapsed, seq_len, pad_to = _pad_decode_truncate(model, codes, device, pad_multiple=pad_mult)
                 audio_np = result.float().cpu().numpy()
                 logger.info(
                     f"[decoder-subprocess] VQ decode: {elapsed:.3f}s "
@@ -211,7 +218,9 @@ class VQManager:
             return self.decode_vq_tokens(codes)
 
         t0 = time.perf_counter()
-        self._decoder_conn.send({"codes": codes.cpu().numpy()})
+        # Use smaller pad for short sequences (streaming chunks)
+        pad_mult = CHUNK_DECODE_PAD_TO if codes.shape[-1] <= CHUNK_DECODE_PAD_TO else DECODE_PAD_TO
+        self._decoder_conn.send({"codes": codes.cpu().numpy(), "pad_multiple": pad_mult})
 
         if not self._decoder_conn.poll(timeout=120):
             raise RuntimeError("Decoder subprocess timed out")

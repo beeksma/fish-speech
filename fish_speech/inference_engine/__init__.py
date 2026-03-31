@@ -19,6 +19,10 @@ from fish_speech.utils import autocast_exclude_mps, set_seed
 from fish_speech.utils.schema import ServeTTSRequest
 
 
+STREAM_CHUNK_SIZE = 25    # New tokens per chunk (~1.16s audio at 21.5 Hz)
+STREAM_LEFT_CONTEXT = 25  # Context tokens for windowed transformer quality
+
+
 class TTSInferenceEngine(ReferenceLoader, VQManager):
 
     def __init__(
@@ -35,6 +39,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         self.decoder_model = decoder_model
         self.precision = precision
         self.compile = compile
+        self._frame_length = getattr(decoder_model, "frame_length", 2048)
 
     @torch.inference_mode()
     def inference(self, req: ServeTTSRequest) -> Generator[InferenceResult, None, None]:
@@ -85,9 +90,11 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 error=None,
             )
 
-        # Collect all LLM results first. At batch=1, the LLM finishes ALL
-        # token generation before any VQ decode starts — they never overlap.
-        results = []
+        # Process LLM results — either streaming (decode chunks as they
+        # arrive) or batch (collect all, then decode).
+        segments = []
+        tokens_decoded = 0  # Track how many tokens we've yielded audio for
+        is_streaming_chunks = req.streaming and self.subprocess_active
 
         while True:
             wrapped_result: WrappedGenerateResponse = response_queue.get()
@@ -109,28 +116,49 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 )
 
             result: GenerateResponse = wrapped_result.response
-            if result.action != "next":
-                results.append(result)
-            else:
-                break
 
-        # Offload LLM only in subprocess mode — frees VRAM so the decoder
-        # subprocess has room for MIOpen workspace. In-process mode keeps
-        # LLM on GPU to avoid unnecessary PCIe round-trip.
-        if results and self.subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
-            self.llama_queue.offload_to_cpu()
-
-        # Decode all segments
-        segments = []
-        for result in results:
-            segment = self.get_audio_segment(result)
-            if req.streaming:
-                yield InferenceResult(
-                    code="segment",
-                    audio=(sample_rate, segment),
-                    error=None,
+            if result.action == "chunk" and is_streaming_chunks:
+                # Decode this chunk while LLM continues generating
+                segment = self._decode_streaming_chunk(
+                    result.codes, tokens_decoded, sample_rate,
                 )
-            segments.append(segment)
+                if segment is not None and len(segment) > 0:
+                    tokens_decoded = result.codes.shape[-1]
+                    segments.append(segment)
+                    yield InferenceResult(
+                        code="segment",
+                        audio=(sample_rate, segment),
+                        error=None,
+                    )
+
+            elif result.action == "sample":
+                # Final result — decode any remaining tokens after last chunk
+                if is_streaming_chunks and tokens_decoded > 0:
+                    tail = self._decode_streaming_chunk(
+                        result.codes, tokens_decoded, sample_rate,
+                    )
+                    if tail is not None and len(tail) > 0:
+                        segments.append(tail)
+                        yield InferenceResult(
+                            code="segment",
+                            audio=(sample_rate, tail),
+                            error=None,
+                        )
+                else:
+                    # Batch mode: offload LLM, decode full sequence
+                    if self.subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
+                        self.llama_queue.offload_to_cpu()
+                    segment = self.get_audio_segment(result)
+                    segments.append(segment)
+                    if req.streaming:
+                        yield InferenceResult(
+                            code="segment",
+                            audio=(sample_rate, segment),
+                            error=None,
+                        )
+
+            elif result.action == "next":
+                break
 
         # Clean up
         if torch.cuda.is_available():
@@ -155,6 +183,32 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
         return None
 
+    def _decode_streaming_chunk(self, all_codes, tokens_decoded, sample_rate):
+        """Decode a streaming chunk with left context, return only new audio."""
+        total_tokens = all_codes.shape[-1]
+        new_start = tokens_decoded
+        new_end = total_tokens
+
+        if new_end <= new_start:
+            return None
+
+        # Include left context for windowed transformer quality
+        context_start = max(0, new_start - STREAM_LEFT_CONTEXT)
+        codes_with_context = all_codes[:, context_start:new_end]
+
+        # Decode the chunk (context + new tokens)
+        audio = self.decode_vq_tokens(codes_with_context)
+        if not isinstance(audio, np.ndarray):
+            audio = audio.float().cpu().numpy()
+
+        # Trim context audio — only keep the new tokens' audio
+        context_tokens = new_start - context_start
+        trim_samples = context_tokens * self._frame_length
+        if trim_samples > 0 and trim_samples < len(audio):
+            audio = audio[trim_samples:]
+
+        return audio
+
     def send_Llama_request(
         self, req: ServeTTSRequest, prompt_tokens: list, prompt_texts: list
     ) -> queue.Queue:
@@ -175,6 +229,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             chunk_length=req.chunk_length,
             prompt_tokens=prompt_tokens,
             prompt_text=prompt_texts,
+            stream_chunk_size=STREAM_CHUNK_SIZE if req.streaming and self.subprocess_active else 0,
         )
 
         # Create a queue to get the response

@@ -193,6 +193,8 @@ def decode_n_tokens(
     audio_masks: torch.Tensor,
     audio_parts: torch.Tensor,
     decode_one_token=decode_one_token_ar,
+    on_chunk: Optional[Callable] = None,
+    chunk_size: int = 0,
 ):
     # Rolling window for RAS (Repetition Aware Sampling)
     previous_tokens = torch.zeros(
@@ -230,6 +232,10 @@ def decode_n_tokens(
         ]
         new_tokens.append(next_token)
 
+        # Emit intermediate chunk for streaming decode
+        if chunk_size > 0 and on_chunk is not None and (i + 1) % chunk_size == 0:
+            on_chunk(torch.cat(new_tokens, dim=1))
+
         if cur_token[0, 0, -1] == im_end_id:
             break
 
@@ -249,6 +255,8 @@ def generate(
     audio_parts: torch.Tensor,
     decode_one_token=decode_one_token_ar,
     num_samples: int = 1,
+    on_chunk: Optional[Callable] = None,
+    chunk_size: int = 0,
     **sampling_kwargs,
 ):
     """
@@ -366,6 +374,8 @@ def generate(
         audio_masks=audio_masks,
         audio_parts=audio_parts,
         decode_one_token=decode_one_token,
+        on_chunk=on_chunk,
+        chunk_size=chunk_size,
     )
 
     if torch.cuda.is_available():
@@ -480,7 +490,7 @@ def decode_to_audio(codes, codec):
 
 @dataclass
 class GenerateResponse:
-    action: Literal["sample", "next"]
+    action: Literal["sample", "next", "chunk"]
     codes: Optional[torch.Tensor] = None
     text: Optional[str] = None
 
@@ -571,6 +581,8 @@ def generate_long(
     chunk_length: int = 512,
     prompt_text: Optional[Union[str, list[str]]] = None,
     prompt_tokens: Optional[Union[torch.Tensor, list[torch.Tensor]]] = None,
+    stream_chunk_size: int = 0,
+    stream_response_queue: Optional[queue.Queue] = None,
 ):
     assert 0 < top_p <= 1, "top_p must be in (0, 1]"
     assert 0 < temperature < 2, "temperature must be in (0, 2)"
@@ -709,6 +721,20 @@ def generate_long(
             encoded = encoded.to(device=device)
             prompt_length = encoded.size(1)
 
+            # Streaming chunk callback: emit intermediate codes for
+            # pipelined decode while LLM is still generating.
+            chunk_callback = None
+            if stream_chunk_size > 0 and stream_response_queue is not None:
+                def _on_chunk(all_tokens_so_far, _pl=prompt_length, _rq=stream_response_queue, _bt=batch_text):
+                    # all_tokens_so_far: [codebook_dim, seq] from decode_n_tokens
+                    # Extract codes same way as final: skip first row (text), skip prompt
+                    codes_so_far = all_tokens_so_far[1:, :].clone()
+                    _rq.put(WrappedGenerateResponse(
+                        status="success",
+                        response=GenerateResponse(action="chunk", codes=codes_so_far, text=_bt),
+                    ))
+                chunk_callback = _on_chunk
+
             y = generate(
                 model=model,
                 prompt=encoded,
@@ -719,6 +745,8 @@ def generate_long(
                 temperature=temperature,
                 top_p=top_p,
                 top_k=top_k,
+                on_chunk=chunk_callback,
+                chunk_size=stream_chunk_size,
             )
 
             if sample_idx == 0 and batch_idx == 0 and compile:
@@ -930,9 +958,15 @@ def launch_thread_safe_queue(
             kwargs = item.request
             response_queue = item.response_queue
 
+            # Extract streaming params before passing to generate_long
+            stream_chunk_size = kwargs.pop("stream_chunk_size", 0)
+
             try:
                 for chunk in generate_long(
-                    model=model, decode_one_token=decode_one_token, **kwargs
+                    model=model, decode_one_token=decode_one_token,
+                    stream_chunk_size=stream_chunk_size,
+                    stream_response_queue=response_queue if stream_chunk_size > 0 else None,
+                    **kwargs,
                 ):
                     response_queue.put(
                         WrappedGenerateResponse(status="success", response=chunk)
