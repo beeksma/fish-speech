@@ -3,7 +3,7 @@ import multiprocessing
 import os
 import re
 from argparse import Namespace
-from threading import Lock
+from asyncio import Lock
 
 import pyrootutils
 import uvicorn

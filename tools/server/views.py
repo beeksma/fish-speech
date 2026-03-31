@@ -172,14 +172,15 @@ async def tts(req: Annotated[ServeTTSRequest, Body(exclusive=True)]):
         # Perform TTS
         if req.streaming:
             return StreamResponse(
-                iterable=inference_async(req, engine),
+                iterable=inference_async(req, engine, app_state.lock),
                 headers={
                     "Content-Disposition": f"attachment; filename=audio.{req.format}",
                 },
                 content_type=get_content_type(req.format),
             )
         else:
-            fake_audios = next(inference(req, engine))
+            async with app_state.lock:
+                fake_audios = next(inference(req, engine))
             buffer = io.BytesIO()
             sf.write(
                 buffer,

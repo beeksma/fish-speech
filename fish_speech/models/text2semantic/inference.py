@@ -779,6 +779,103 @@ class GenerateRequest:
     response_queue: queue.Queue
 
 
+class WorkerCommand:
+    """Command sent to the worker thread for execution on the GPU thread."""
+
+    def __init__(self, fn, result_queue):
+        self.fn = fn
+        self.result_queue = result_queue
+
+
+class LlamaQueue:
+    """Thread-safe queue wrapper with LLM VRAM management.
+
+    On VRAM-constrained GPUs (e.g. 16GB RX 9070 XT), the LLM weights + KV cache
+    (~5.7GB INT8) coexist with the DAC decoder (~3.6GB). When miopen-conv-fix
+    allocates workspace for optimized GEMM kernels (up to 1.4GB per conv layer),
+    total VRAM can exceed the safety cap (VRAM_FRACTION), causing page faults.
+
+    IMPORTANT: On RDNA 4 (gfx1201), ALL GPU operations must happen on the same
+    thread. Cross-thread HIP context state after heavy LLM generation causes GPU
+    page faults in MIOpen conv kernels. The worker thread owns the GPU — offload,
+    decode, and reload all run there via run_on_worker().
+    """
+
+    def __init__(self, input_queue, model_ref, device, worker_done_event):
+        self.queue = input_queue
+        self._model_ref = model_ref
+        self._device = device
+        self._offloaded = False
+        self._worker_done = worker_done_event  # set by worker after each request
+
+    def put(self, item):
+        self.queue.put(item)
+
+    def run_on_worker(self, fn):
+        """Execute fn on the worker thread and return the result.
+
+        All GPU operations (offload, decode, reload) should go through this
+        to avoid cross-thread HIP context corruption on RDNA 4.
+        """
+        self._worker_done.wait()
+        result_queue = queue.Queue()
+        self.queue.put(WorkerCommand(fn, result_queue))
+        result = result_queue.get()
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    @staticmethod
+    def _move_all_tensors(model, device):
+        """Move model + any ad-hoc tensor attributes (not just params/buffers)."""
+        with torch.inference_mode(False):
+            model.to(device)
+        # Move ad-hoc tensor attributes that nn.Module.to() misses
+        for attr_name in dir(model):
+            if attr_name.startswith("_"):
+                obj = getattr(model, attr_name, None)
+                if isinstance(obj, torch.Tensor) and obj.device != torch.device(device):
+                    setattr(model, attr_name, obj.to(device))
+            try:
+                obj = getattr(model, attr_name, None)
+            except Exception:
+                continue
+            if isinstance(obj, torch.Tensor) and not isinstance(obj, torch.nn.Parameter):
+                if obj.device != torch.device(device):
+                    setattr(model, attr_name, obj.to(device))
+
+    def offload_to_cpu(self):
+        """Move LLM to CPU via the worker thread."""
+        model = self._model_ref[0]
+        if model is None or self._offloaded:
+            return
+
+        def _offload():
+            torch.cuda.synchronize()
+            self._move_all_tensors(model, "cpu")
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        self.run_on_worker(_offload)
+        self._offloaded = True
+        vram_mb = torch.cuda.memory_allocated() / 1e6
+        logger.info(f"LLM offloaded to CPU ({vram_mb:.0f}MB VRAM remaining)")
+
+    def reload_to_gpu(self):
+        """Reload LLM to GPU via the worker thread."""
+        model = self._model_ref[0]
+        if model is None or not self._offloaded:
+            return
+
+        def _reload():
+            self._move_all_tensors(model, self._device)
+
+        self.run_on_worker(_reload)
+        self._offloaded = False
+        self._worker_done.clear()  # reset for next generation cycle
+        logger.info("LLM reloaded to GPU")
+
+
 def launch_thread_safe_queue(
     checkpoint_path,
     device,
@@ -787,11 +884,14 @@ def launch_thread_safe_queue(
 ):
     input_queue = queue.Queue()
     init_event = threading.Event()
+    worker_done_event = threading.Event()
+    model_ref = [None]  # mutable container shared with LlamaQueue
 
     def worker():
         model, decode_one_token = init_model(
             checkpoint_path, device, precision, compile=compile
         )
+        model_ref[0] = model
 
         max_seq_len = int(os.environ.get("MAX_SEQ_LEN", model.config.max_seq_len))
         with torch.device(device):
@@ -806,13 +906,29 @@ def launch_thread_safe_queue(
 
         setup_cpu_offload(model, torch.device(device))
 
+        # Signal that init is done AND worker is idle — safe to offload.
+        # This allows model_manager to offload the LLM to CPU before loading
+        # the decoder, so they never coexist on GPU during startup.
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        worker_done_event.set()
         init_event.set()
 
         while True:
-            item: GenerateRequest | None = input_queue.get()
+            item = input_queue.get()
             if item is None:
                 break
 
+            # WorkerCommand: run arbitrary callable on GPU thread
+            if isinstance(item, WorkerCommand):
+                try:
+                    result = item.fn()
+                    item.result_queue.put(result)
+                except Exception as e:
+                    item.result_queue.put(e)
+                continue
+
+            # GenerateRequest: LLM token generation
             kwargs = item.request
             response_queue = item.response_queue
 
@@ -824,21 +940,25 @@ def launch_thread_safe_queue(
                         WrappedGenerateResponse(status="success", response=chunk)
                     )
 
-                # Only clear cache after complete request batch
+                # Clear cache and signal AFTER all CUDA work is done.
+                # The main thread waits on this before touching the model.
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                worker_done_event.set()
 
             except Exception as e:
                 logger.error(traceback.format_exc())
                 response_queue.put(WrappedGenerateResponse(status="error", response=e))
-                # Clear cache on error
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                worker_done_event.set()
 
     threading.Thread(target=worker, daemon=True).start()
     init_event.wait()
 
-    return input_queue
+    return LlamaQueue(input_queue, model_ref, device, worker_done_event)
 
 
 @click.command()

@@ -69,11 +69,11 @@ class MsgPackRequest(HttpRequest):
         )
 
 
-async def inference_async(req: ServeTTSRequest, engine: TTSInferenceEngine):
-    for chunk in inference(req, engine):
-        print("Got chunk")
-        if isinstance(chunk, bytes):
-            yield chunk
+async def inference_async(req: ServeTTSRequest, engine: TTSInferenceEngine, lock):
+    async with lock:
+        for chunk in inference(req, engine):
+            if isinstance(chunk, bytes):
+                yield chunk
 
 
 async def buffer_to_async_generator(buffer):

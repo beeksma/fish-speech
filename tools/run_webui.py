@@ -11,7 +11,7 @@ pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
-from fish_speech.utils.gpu import auto_detect_rocm_gfx, check_vram_and_advise
+from fish_speech.utils.gpu import apply_vram_fraction, auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
 from tools.webui import build_app
 from tools.webui.inference import get_inference_wrapper
@@ -51,18 +51,8 @@ if __name__ == "__main__":
     # even with VRAM freed — likely invalid MIOpen descriptor/algo for RDNA 4.
     # Tracked: pytorch/pytorch#150168, ROCm/MIOpen#3650, ROCm/TheRock#3077
 
-    # Optional VRAM cap — set VRAM_FRACTION (0.0-1.0) to prevent system freeze
-    # on memory-constrained GPUs. Unset or 0 = no cap (default).
-    vram_fraction = float(os.environ.get("VRAM_FRACTION", "0"))
-    if 0 < vram_fraction <= 1 and torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(vram_fraction)
-        total_mem = torch.cuda.get_device_properties(0).total_memory
-        logger.info(
-            f"VRAM cap: {vram_fraction:.0%} "
-            f"({vram_fraction * total_mem / 1e9:.1f}GB / {total_mem / 1e9:.1f}GB)"
-        )
-
     auto_detect_rocm_gfx()
+    apply_vram_fraction()
     check_vram_and_advise(args.llama_checkpoint_path)
 
     # Check if MPS or CUDA is available

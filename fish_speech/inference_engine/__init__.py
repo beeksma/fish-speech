@@ -61,6 +61,12 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             set_seed(req.seed)
             logger.warning(f"set seed: {req.seed}")
 
+        # Ensure LLM is on GPU for generation. It may have been offloaded
+        # during startup (to make room for decoder loading) or left offloaded
+        # if reload was skipped on the previous request.
+        if hasattr(self.llama_queue, "_offloaded") and self.llama_queue._offloaded:
+            self.llama_queue.reload_to_gpu()
+
         # Get the symbolic tokens from the LLAMA model
         response_queue = self.send_Llama_request(req, prompt_tokens, prompt_texts)
 
@@ -81,10 +87,11 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 error=None,
             )
 
-        segments = []
+        # Collect all LLM results first. At batch=1, the LLM finishes ALL
+        # token generation before any VQ decode starts — they never overlap.
+        results = []
 
         while True:
-            # Get the response from the LLAMA model
             wrapped_result: WrappedGenerateResponse = response_queue.get()
             if wrapped_result.status == "error":
                 yield InferenceResult(
@@ -98,7 +105,6 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 )
                 break
 
-            # Check the response type
             if not isinstance(wrapped_result.response, GenerateResponse):
                 raise TypeError(
                     f"Expected GenerateResponse, got {type(wrapped_result.response).__name__}"
@@ -106,19 +112,35 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
             result: GenerateResponse = wrapped_result.response
             if result.action != "next":
-                segment = self.get_audio_segment(result)
-
-                if req.streaming:  # Used only by the API server
-                    yield InferenceResult(
-                        code="segment",
-                        audio=(sample_rate, segment),
-                        error=None,
-                    )
-                segments.append(segment)
+                results.append(result)
             else:
                 break
 
-        # Clean up the memory
+        # Offload LLM to free VRAM for the decoder subprocess's workspace.
+        # With subprocess decode on RDNA 4, this also ensures the parent's
+        # GPU memory pressure is low while the subprocess runs MIOpen kernels.
+        llm_offloaded = False
+        if results and hasattr(self.llama_queue, "offload_to_cpu"):
+            self.llama_queue.offload_to_cpu()
+            llm_offloaded = True
+
+        # Decode all segments
+        segments = []
+        for result in results:
+            segment = self.get_audio_segment(result)
+            if req.streaming:
+                yield InferenceResult(
+                    code="segment",
+                    audio=(sample_rate, segment),
+                    error=None,
+                )
+            segments.append(segment)
+
+        # Reload LLM for the next request
+        if llm_offloaded:
+            self.llama_queue.reload_to_gpu()
+
+        # Clean up
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
@@ -150,7 +172,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
         # Prepare the request
         request = dict(
-            device=self.decoder_model.device,
+            device=self.llama_queue._device,
             max_new_tokens=req.max_new_tokens,
             text=req.text,
             top_p=req.top_p,

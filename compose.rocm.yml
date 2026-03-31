@@ -17,6 +17,8 @@ services:
       - seccomp=unconfined
     ipc: host
     shm_size: 8G
+    mem_limit: ${MEM_LIMIT:-40g}
+    memswap_limit: ${MEM_LIMIT:-40g}
     ulimits:
       nofile:
         soft: 65536
@@ -50,6 +52,8 @@ services:
       - seccomp=unconfined
     ipc: host
     shm_size: 8G
+    mem_limit: ${MEM_LIMIT:-40g}
+    memswap_limit: ${MEM_LIMIT:-40g}
     ulimits:
       nofile:
         soft: 65536

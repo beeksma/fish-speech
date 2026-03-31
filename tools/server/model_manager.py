@@ -1,12 +1,35 @@
+import atexit
+import os
+
 import torch
 from loguru import logger
 
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
-from fish_speech.utils.gpu import auto_detect_rocm_gfx, check_vram_and_advise
+from fish_speech.utils.gpu import apply_vram_fraction, auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
 from tools.server.inference import inference_wrapper as inference
+
+
+def _should_use_subprocess_decoder():
+    """Decide whether to use a subprocess for DAC decode.
+
+    On RDNA 4 (gfx1201), MIOpen conv kernels page-fault after LLM generation
+    corrupts the parent process's HIP page tables. A subprocess with its own
+    HIP context avoids this entirely.
+    """
+    if not torch.cuda.is_available():
+        return False
+    env = os.environ.get("USE_SUBPROCESS_DECODER", "auto").lower()
+    if env in ("true", "1"):
+        return True
+    if env in ("false", "0"):
+        return False
+    # Auto: enable on RDNA 4 where the page fault occurs
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    return "gfx1201" in arch or "gfx1200" in arch
 
 
 class ModelManager:
@@ -29,9 +52,9 @@ class ModelManager:
         self.precision = torch.half if half else torch.bfloat16
 
         auto_detect_rocm_gfx()
+        apply_vram_fraction()
         check_vram_and_advise(llama_checkpoint_path)
 
-        # Check if MPS or CUDA is available
         if torch.backends.mps.is_available():
             self.device = "mps"
             logger.info("mps is available, running on mps.")
@@ -39,10 +62,14 @@ class ModelManager:
             self.device = "cpu"
             logger.info("CUDA is not available, running on CPU.")
 
-        # Load the TTS models
+        # Load models sequentially — offload LLM before loading decoder so
+        # they never coexist on GPU simultaneously during startup.
         self.load_llama_model(
             llama_checkpoint_path, self.device, self.precision, self.compile, self.mode
         )
+        if self.device == "cuda" and hasattr(self, "llama_queue") and hasattr(self.llama_queue, "offload_to_cpu"):
+            self.llama_queue.offload_to_cpu()
+
         self.load_decoder_model(
             decoder_config_name, decoder_checkpoint_path, self.device, self.precision
         )
@@ -53,14 +80,28 @@ class ModelManager:
             compile=self.compile,
         )
 
-        # Warm up the models
-        if self.mode == "tts":
-            self.warm_up(self.tts_inference_engine)
+        # On RDNA 4: launch a persistent subprocess for DAC decode with its
+        # own HIP context, isolated from LLM generation's memory state.
+        if _should_use_subprocess_decoder():
+            logger.info("RDNA 4 detected — launching decoder subprocess")
+            self.tts_inference_engine.launch_decoder_subprocess(
+                config_name=decoder_config_name,
+                checkpoint_path=decoder_checkpoint_path,
+                device=self.device,
+                precision=self.precision,
+            )
+            atexit.register(self.tts_inference_engine._shutdown_decoder_subprocess)
+            # Move parent's DAC to CPU — decode goes through subprocess.
+            # Frees ~2GB VRAM for LLM generation headroom.
+            self.decoder_model.to("cpu")
+            torch.cuda.empty_cache()
+            logger.info("Parent DAC model moved to CPU (decode via subprocess)")
+        else:
+            logger.info("Using in-process decoder")
 
     def load_llama_model(
         self, checkpoint_path, device, precision, compile, mode
     ) -> None:
-
         if mode == "tts":
             self.llama_queue = launch_thread_safe_queue(
                 checkpoint_path=checkpoint_path,
@@ -70,7 +111,6 @@ class ModelManager:
             )
         else:
             raise ValueError(f"Invalid mode: {mode}")
-
         logger.info("LLAMA model loaded.")
 
     def load_decoder_model(

@@ -66,7 +66,7 @@ ARG CUDA_VER=12.9.0
 ARG UV_EXTRA=cu129
 ARG BACKEND=cuda
 # ROCm version (see https://hub.docker.com/r/rocm/dev-ubuntu-24.04)
-ARG ROCM_VER=7.2
+ARG ROCM_VER=7.2.1
 
 ARG UBUNTU_VER=24.04
 ARG PY_VER=3.12
@@ -246,7 +246,20 @@ RUN uv sync --extra ${UV_EXTRA} --frozen
 # ConvDirectNaive. This extension uses MIOpen's Immediate Mode API with per-solution
 # validation to select fast GEMM kernels safely. No-op on CUDA/CPU.
 # See: pytorch/pytorch#150168, github.com/Imagilux/miopen-conv-fix
-RUN uv pip install --no-deps miopen-conv-fix@git+https://github.com/Imagilux/miopen-conv-fix.git@main
+USER root
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "${BACKEND}" = "rocm" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends rocthrust-dev rocprim-dev miopen-hip-dev; \
+    fi
+USER ${USER_UID}:${USER_GID}
+RUN if [ "${BACKEND}" = "rocm" ]; then \
+        git clone --depth 1 https://github.com/Imagilux/miopen-conv-fix.git /tmp/miopen-conv-fix \
+        && cd /tmp/miopen-conv-fix \
+        && /app/.venv/bin/python setup.py build_ext --inplace \
+        && cp -r miopen_conv_fix/ /app/.venv/lib/python${PY_VER}/site-packages/miopen_conv_fix/ \
+        && rm -rf /tmp/miopen-conv-fix; \
+    fi
 
 # Create common entrypoint script
 RUN printf '%s\n' \

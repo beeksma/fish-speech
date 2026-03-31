@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import click
@@ -48,19 +49,42 @@ def load_model(config_name, checkpoint_path, device="cuda", precision=None):
 
     logger.info(f"Loaded model: {result}")
 
-    # Patch decoder conv layers to bypass PyTorch's workspace=0 bug on ROCm.
-    # PyTorch 2.11 fixed the bug for small workspace sizes, but large conv layers
-    # in the decoder (spatial dims up to 1M) need >1 GB workspace and still fall
-    # back to ConvDirectNaive (~98% of decode time). miopen-conv-fix allocates
-    # workspace properly via MIOpen's Immediate Mode API.
-    if device == "cuda" and hasattr(model, "decoder"):
+    # Bake weight_norm parametrizations into plain tensors. Weight-normed
+    # modules compute self.weight on-the-fly from weight_v and weight_g.
+    # After LLM generation fragments GPU memory, these lazy computations
+    # can produce tensors at bad addresses. Baking gives us stable, pre-
+    # computed weight tensors that miopen-conv-fix can safely pass to MIOpen.
+    from torch.nn.utils.parametrize import remove_parametrizations
+    baked = 0
+    for module in model.modules():
+        parametrizations = getattr(module, "parametrizations", None)
+        if not parametrizations:
+            continue
+        for name in list(parametrizations.keys()):
+            remove_parametrizations(module, name, leave_parametrized=True)
+            baked += 1
+    if baked > 0:
+        logger.info(f"Baked {baked} weight_norm parametrizations for inference")
+
+    # Patch ALL Conv1d/ConvTranspose1d in the DAC model (decoder + quantizer)
+    # to bypass PyTorch's workspace=0 bug on ROCm.
+    #
+    # Why the whole model, not just the decoder:
+    # When the LLM is offloaded to CPU during decode, freed VRAM lets PyTorch
+    # 2.11 allocate workspace for the quantizer's conv layers too. On gfx1201,
+    # MIOpen's Find API can select broken kernels for those shapes, causing GPU
+    # page faults. Patching the whole model routes all conv ops through our
+    # Immediate Mode API with per-solution validation, avoiding broken kernels.
+    if device == "cuda" and not os.environ.get("SKIP_MIOPEN_FIX"):
         try:
             import miopen_conv_fix
 
-            count = miopen_conv_fix.patch_module(model.decoder)
-            logger.info(f"miopen-conv-fix: patched {count} conv layers in decoder")
+            count = miopen_conv_fix.patch_module(model)
+            logger.info(f"miopen-conv-fix: patched {count} conv layers in DAC model")
         except ImportError:
             pass
+    elif os.environ.get("SKIP_MIOPEN_FIX"):
+        logger.info("miopen-conv-fix: SKIPPED (SKIP_MIOPEN_FIX set)")
 
     return model
 

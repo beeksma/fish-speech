@@ -51,6 +51,24 @@ def auto_detect_rocm_gfx():
         )
 
 
+def apply_vram_fraction():
+    """Apply VRAM allocation cap if VRAM_FRACTION is set.
+
+    Prevents system freeze on OOM by capping PyTorch's GPU allocation.
+    Called early in model init — applies to all entry points (webui, API server).
+    """
+    if not torch.cuda.is_available():
+        return
+    vram_fraction = float(os.environ.get("VRAM_FRACTION", "0"))
+    if 0 < vram_fraction <= 1:
+        torch.cuda.set_per_process_memory_fraction(vram_fraction)
+        total_mem = torch.cuda.get_device_properties(0).total_memory
+        logger.info(
+            f"VRAM cap: {vram_fraction:.0%} "
+            f"({vram_fraction * total_mem / 1e9:.1f}GB / {total_mem / 1e9:.1f}GB)"
+        )
+
+
 def check_vram_and_advise(checkpoint_path: str):
     """Log VRAM guidance if the model may not fit.
 
