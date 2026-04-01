@@ -22,10 +22,11 @@ class TestIsRocm:
 
 
 class TestAutoDetectRocmGfx:
-    def test_skips_when_not_rocm(self):
+    def test_skips_when_not_rocm(self, monkeypatch):
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
         with patch("fish_speech.utils.gpu._is_rocm", return_value=False):
             auto_detect_rocm_gfx()
-            assert "HSA_OVERRIDE_GFX_VERSION" not in os.environ or True
+            assert "HSA_OVERRIDE_GFX_VERSION" not in os.environ
 
     def test_skips_when_already_set(self, monkeypatch):
         monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
