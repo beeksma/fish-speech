@@ -1166,7 +1166,7 @@ requires-dist = [
     { name = "torchaudio", marker = "extra == 'cu129'", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu129", conflict = { package = "fish-speech", extra = "cu129" } },
     { name = "torchaudio", marker = "extra == 'rocm72'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "fish-speech", extra = "rocm72" } },
     { name = "torchaudio", marker = "extra == 'stable'" },
-    { name = "transformers", specifier = "<=4.57.3" },
+    { name = "transformers", specifier = ">=4.45.0" },
     { name = "triton-rocm", marker = "extra == 'rocm72'", specifier = "==3.6.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "fish-speech", extra = "rocm72" } },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "wandb", specifier = ">=0.19.0" },
@@ -5362,13 +5362,13 @@ name = "triton-rocm"
 version = "3.6.0"
 source = { registry = "https://download.pytorch.org/whl/rocm7.2" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp310-cp310-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp312-cp312-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp313-cp313-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp313-cp313t-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp314-cp314-linux_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/triton_rocm-3.6.0-cp314-cp314t-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp310-cp310-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp313-cp313-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp313-cp313t-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp314-cp314-linux_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/triton_rocm-3.6.0-cp314-cp314t-linux_x86_64.whl" },
 ]
 
 [[package]]
