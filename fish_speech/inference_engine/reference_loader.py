@@ -26,6 +26,8 @@ class ReferenceLoader:
         Component of the TTSInferenceEngine class.
         Loads and manages the cache for the reference audio and text.
         """
+        super().__init__()
+
         self.ref_by_id: dict = {}
         self.ref_by_hash: dict = {}
 

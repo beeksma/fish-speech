@@ -318,52 +318,34 @@ RUN printf '%s\n' \
 # App stages
 ##############################################################
 
-# Gradio WebUI
+# Gradio WebUI (lightweight — no GPU, connects to API server)
 FROM app-base AS webui
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 ARG GRADIO_SERVER_NAME="0.0.0.0"
 ARG GRADIO_SERVER_PORT=7860
-ARG LLAMA_CHECKPOINT_PATH="checkpoints/s2-pro"
-ARG DECODER_CHECKPOINT_PATH="checkpoints/s2-pro/codec.pth"
-ARG DECODER_CONFIG_NAME="modded_dac_vq"
 
-
-# Expose port
 EXPOSE ${GRADIO_SERVER_PORT}
 
-# Set environment variables
 ENV GRADIO_SERVER_NAME=${GRADIO_SERVER_NAME}
 ENV GRADIO_SERVER_PORT=${GRADIO_SERVER_PORT}
-ENV LLAMA_CHECKPOINT_PATH=${LLAMA_CHECKPOINT_PATH}
-ENV DECODER_CHECKPOINT_PATH=${DECODER_CHECKPOINT_PATH}
-ENV DECODER_CONFIG_NAME=${DECODER_CONFIG_NAME}
+ENV API_URL="http://server:8080"
 
 # Create webui entrypoint
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'source /app/common.sh' \
     '' \
-    'log "Starting Fish Speech WebUI..."' \
-    'validate_env' \
-    '' \
-    'DEVICE_ARGS=$(build_device_args)' \
-    'COMPILE_ARGS=$(build_compile_args "$@")' \
-    '' \
-    'log "Device args: ${DEVICE_ARGS:-none}"' \
-    'log "Compile args: ${COMPILE_ARGS}"' \
-    'log "Server: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
+    'log "Starting Fish Speech WebUI (API client)..."' \
+    'log "API server: ${API_URL}"' \
+    'log "Gradio: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
     '' \
     'exec uv run --no-sync tools/run_webui.py \' \
-    '  --llama-checkpoint-path "${LLAMA_CHECKPOINT_PATH}" \' \
-    '  --decoder-checkpoint-path "${DECODER_CHECKPOINT_PATH}" \' \
-    '  --decoder-config-name "${DECODER_CONFIG_NAME}" \' \
-    '  ${DEVICE_ARGS} ${COMPILE_ARGS}' \
+    '  --api-url "${API_URL}"' \
     > /app/start_webui.sh && chmod +x /app/start_webui.sh
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${GRADIO_SERVER_PORT}/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${GRADIO_SERVER_PORT}/ || exit 1
 
 ENTRYPOINT ["/app/start_webui.sh"]
 

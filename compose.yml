@@ -1,21 +1,6 @@
 name: fish-speech
 
 services:
-  webui:
-    extends:
-      file: compose.base.yml
-      service: app-base
-    build:
-      target: webui
-    environment:
-      COMPILE: ${COMPILE:-0}
-      LLAMA_CHECKPOINT_PATH: ${LLAMA_CHECKPOINT_PATH:-checkpoints/s2-pro}
-      DECODER_CHECKPOINT_PATH: ${DECODER_CHECKPOINT_PATH:-checkpoints/s2-pro/codec.pth}
-      DECODER_CONFIG_NAME: ${DECODER_CONFIG_NAME:-modded_dac_vq}
-    profiles: ["webui"]
-    ports:
-      - "${GRADIO_PORT:-7860}:7860"
-
   server:
     extends:
       file: compose.base.yml
@@ -27,6 +12,19 @@ services:
       LLAMA_CHECKPOINT_PATH: ${LLAMA_CHECKPOINT_PATH:-checkpoints/s2-pro}
       DECODER_CHECKPOINT_PATH: ${DECODER_CHECKPOINT_PATH:-checkpoints/s2-pro/codec.pth}
       DECODER_CONFIG_NAME: ${DECODER_CONFIG_NAME:-modded_dac_vq}
-    profiles: ["server"]
     ports:
       - "${API_PORT:-8080}:8080"
+
+  webui:
+    extends:
+      file: compose.base.yml
+      service: app-base
+    build:
+      target: webui
+    environment:
+      API_URL: http://server:8080
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "${GRADIO_PORT:-7860}:7860"
