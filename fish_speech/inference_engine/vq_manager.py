@@ -2,6 +2,7 @@ import multiprocessing
 import time
 from typing import Callable, Optional
 
+import numpy as np
 import torch
 from loguru import logger
 
@@ -234,11 +235,16 @@ class VQManager:
 
         raise ValueError(f"Unknown model type: {type(self.decoder_model)}")
 
-    def _decode_via_subprocess(self, codes):
+    def _decode_via_subprocess(self, codes: torch.Tensor) -> torch.Tensor:
         """Send codes to decoder subprocess, receive audio."""
         if not self._decoder_process.is_alive():
-            logger.error("Decoder subprocess died, falling back to in-process")
+            logger.error("Decoder subprocess died, attempting in-process fallback")
             self.shutdown_decoder_subprocess()
+            # Move parent DAC back to GPU for in-process decode
+            target_device = codes.device
+            if self.decoder_model.device != target_device:
+                logger.warning(f"Moving DAC model to {target_device} for fallback decode")
+                self.decoder_model.to(target_device)
             return self.decode_vq_tokens(codes)
 
         t0 = time.perf_counter()
@@ -256,11 +262,17 @@ class VQManager:
         logger.info(f"VQ decode (subprocess): {time.perf_counter() - t0:.3f}s")
         return torch.from_numpy(response["audio"])
 
-    def _encode_via_subprocess(self, audio_np, audio_length):
+    def _encode_via_subprocess(
+        self, audio_np: np.ndarray, audio_length: int
+    ) -> Optional[torch.Tensor]:
         """Send audio to decoder subprocess for encoding, receive tokens."""
         if not self._decoder_process.is_alive():
             logger.error("Decoder subprocess died, falling back to in-process encode")
             self.shutdown_decoder_subprocess()
+            # Move parent DAC back to GPU for in-process encode fallback
+            if torch.cuda.is_available() and self.decoder_model.device.type == "cpu":
+                logger.warning("Moving DAC model to cuda for fallback encode")
+                self.decoder_model.to("cuda")
             return None  # caller will fall through to in-process path
 
         t0 = time.perf_counter()
