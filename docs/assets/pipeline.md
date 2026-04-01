@@ -8,36 +8,36 @@ flowchart TD
     end
 
     subgraph TOKENIZATION
-        B[FishTokenizer<br/><small>HuggingFace AutoTokenizer</small>]
-        C[Prompt Builder<br/><small>ContentSequence + chat template</small>]
+        B["<b>FishTokenizer</b><br/><small>HuggingFace AutoTokenizer</small><br/><small>text → token IDs</small>"]
+        C["<b>ContentSequence</b><br/><small>Prompt Builder</small><br/><small>chat template + reference tokens</small>"]
     end
 
-    subgraph DUAL_AR["Dual-AR Transformer (4.4B params)"]
+    subgraph DUAL_AR["DualARTransformer — Dual-AR LLM (4.4B params)"]
         direction TB
 
-        subgraph SLOW["Slow AR — Semantic Generation"]
-            D[Token Embedding<br/><small>text + codebook embeddings</small>]
-            E[32 Transformer Blocks<br/><small>RoPE, GQA, KV cache</small><br/><small>dim=2560, heads=32</small>]
-            F[Logit Bias<br/><small>constrain to semantic tokens only</small>]
-            G[RAS Sampling<br/><small>Repetition Aware Sampling</small>]
+        subgraph SLOW["Slow AR — Semantic Generation (4B)"]
+            D["<b>BaseTransformer.embed()</b><br/><small>Token + Codebook Embeddings</small><br/><small>text IDs + VQ codes → vectors</small>"]
+            E["<b>BaseTransformer</b><br/><small>32 Transformer Blocks</small><br/><small>RoPE, GQA, KV cache — dim=2560</small>"]
+            F["<b>Logit Bias</b><br/><small>constrain to semantic tokens only</small>"]
+            G["<b>RAS Sampler</b><br/><small>Repetition Aware Sampling</small><br/><small>→ 1 semantic token</small>"]
         end
 
-        subgraph FAST["Fast AR — Codebook Prediction"]
-            H[Fast Embedding<br/><small>semantic token → fast space</small>]
-            I["4 Transformer Blocks<br/><small>dim=2560, heads=32</small>"]
-            J["Sample 10 Codebooks<br/><small>codebook_size=4096 each</small>"]
+        subgraph FAST["Fast AR — Codebook Prediction (400M)"]
+            H["<b>FastTransformer.embed()</b><br/><small>Fast Embeddings</small><br/><small>semantic token → fast space</small>"]
+            I["<b>FastTransformer</b><br/><small>4 Transformer Blocks</small><br/><small>dim=2560</small>"]
+            J["<b>Codebook Sampler</b><br/><small>sample 10 codebooks sequentially</small><br/><small>codebook_size=4096 each</small>"]
         end
 
         D --> E --> F --> G
-        G -->|semantic token| H --> I --> J
+        G -->|"semantic token"| H --> I --> J
         J -->|"(10+1) codes per timestep"| K{More tokens?}
         K -->|yes| D
     end
 
-    subgraph DAC_DECODE["DAC Decoder (VQ-GAN)"]
-        L[VQ Lookup<br/><small>10 codebooks → latent vectors</small>]
-        M[Conv Decoder<br/><small>4 upsample blocks<br/>stride 8×8×4×2 = 512×</small>]
-        N[Tanh Output<br/><small>mono waveform</small>]
+    subgraph DAC_DECODE["DAC — Descript Audio Codec (VQ-GAN)"]
+        L["<b>RVQ Quantizer</b><br/><small>Residual Vector Quantizer</small><br/><small>10 codebooks → latent vectors</small>"]
+        M["<b>DAC Decoder</b><br/><small>4 ConvTranspose1d blocks</small><br/><small>stride 8×8×4×2 = 512× upsample</small>"]
+        N["<b>Tanh</b><br/><small>→ mono waveform [-1, 1]</small>"]
     end
 
     subgraph OUTPUT
@@ -45,7 +45,7 @@ flowchart TD
     end
 
     A --> B --> C
-    R -->|VQ encode| L2[VQ Encoder<br/><small>reference → codebook tokens</small>]
+    R -->|"VQ encode"| L2["<b>DAC Encoder</b><br/><small>audio → codebook tokens</small>"]
     L2 --> C
     C -->|"prompt (11, seq_len)"| D
     K -->|"done (IM_END)"| L
@@ -61,23 +61,25 @@ flowchart TD
 
 ## Pipeline Summary
 
-| Stage | Component | Input | Output | Params |
-|-------|-----------|-------|--------|--------|
-| **Tokenize** | FishTokenizer | Text string | Token IDs | — |
-| **Prompt** | ContentSequence | Tokens + ref codes | `(11, seq_len)` tensor | — |
-| **Slow AR** | 32 transformer blocks | Embeddings | 1 semantic token/step | 4B |
-| **Fast AR** | 4 transformer blocks | Semantic token | 10 codebook codes/step | 400M |
-| **VQ Decode** | Codebook lookup | `(10, n_tokens)` codes | `(latent_dim, n_tokens)` | — |
-| **DAC Decode** | Conv upsampler (512x) | Latent vectors | Raw audio waveform | ~100M |
+| Stage | Model / Class | Purpose | Input | Output | Params |
+|-------|--------------|---------|-------|--------|--------|
+| **Tokenize** | `FishTokenizer` | Text to token IDs | Text string | Token IDs | — |
+| **Prompt** | `ContentSequence` | Build chat-formatted prompt | Tokens + ref codes | `(11, seq_len)` tensor | — |
+| **Embed** | `BaseTransformer.embed()` | Fuse text + codebook embeddings | Token IDs + VQ codes | Embedding vectors | — |
+| **Slow AR** | `BaseTransformer` (32 blocks) | Generate semantic tokens (time axis) | Embeddings | 1 semantic token/step | 4B |
+| **Fast AR** | `FastTransformer` (4 blocks) | Generate codebook codes (codebook axis) | Semantic token | 10 codebook codes/step | 400M |
+| **VQ Decode** | `RVQ Quantizer` | Codebook lookup to latent space | `(10, n_tokens)` codes | `(latent_dim, n_tokens)` | — |
+| **Audio Decode** | `DAC Decoder` | Upsample latents to waveform (512x) | Latent vectors | Raw audio samples | ~100M |
+| **Ref Encode** | `DAC Encoder` | Reference audio to codebook tokens | Audio waveform | `(10, n_tokens)` codes | ~100M |
 
 ## Key: 10+1 Codebooks
 
 Each timestep (~21.5 Hz) the Dual-AR generates **11 values**:
 
-| Row | Generated by | Meaning |
-|-----|-------------|---------|
-| 0 | Slow AR | Semantic token (language, content, prosody) |
-| 1-10 | Fast AR | Acoustic codebooks (timbre, detail, phase) |
+| Row | Generated by | Model | Meaning |
+|-----|-------------|-------|---------|
+| 0 | Slow AR | `BaseTransformer` | Semantic token (language, content, prosody) |
+| 1-10 | Fast AR | `FastTransformer` | Acoustic codebooks (timbre, detail, phase) |
 
 The Slow AR runs autoregressively along the **time axis** (token by token).
 The Fast AR runs autoregressively along the **codebook axis** (10 codes per token, sequential).
