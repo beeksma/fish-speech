@@ -146,9 +146,9 @@ RUN set -eux; \
     fi
 
 # Create references and cache directories with proper permissions for the non-root user
-RUN mkdir -p /app/references /app/.cache/miopen /app/.config/miopen /app/.triton \
-    && chown -R ${USER_UID}:${USER_GID} /app/references /app/.cache/miopen /app/.config/miopen /app/.triton \
-    && chmod 755 /app/references /app/.cache/miopen /app/.config/miopen /app/.triton
+RUN mkdir -p /app/references /app/.cache/miopen /app/.cache/matplotlib /app/.config/miopen /app/.triton \
+    && chown -R ${USER_UID}:${USER_GID} /app/references /app/.cache /app/.config/miopen /app/.triton \
+    && chmod 755 /app/references /app/.cache /app/.config/miopen /app/.triton
 
 # Set working directory
 WORKDIR /app
