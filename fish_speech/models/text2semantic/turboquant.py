@@ -231,7 +231,9 @@ class TurboQuantKVCache(nn.Module):
     def attend(
         self, q: torch.Tensor, n_heads: int
     ) -> torch.Tensor:
-        """Run INT4 attention kernel directly on compressed cache.
+        """Run fused INT4 attention kernel on compressed cache.
+
+        Single kernel launch for all (batch, head, query) positions.
 
         Args:
             q: (B, n_heads, S_new, head_dim) query tensor
@@ -240,33 +242,12 @@ class TurboQuantKVCache(nn.Module):
         Returns:
             (B, n_heads, S_new, head_dim) attention output
         """
-        from fish_speech.kernels.int4_attention import int4_polar_attention
+        from fish_speech.kernels.int4_attention import int4_attention_multihead
 
-        B, H_q, S_new, D = q.shape
-        H_kv = self.n_heads  # KV heads
-        heads_per_kv = H_q // H_kv
-        seq_kv = self._seq_high_water
-
-        outputs = []
-        for b in range(B):
-            head_outputs = []
-            for h_q in range(H_q):
-                h_kv = h_q // heads_per_kv  # GQA: map Q head → KV head
-
-                out = int4_polar_attention(
-                    q=q[b, h_q],  # (S_new, D)
-                    k_packed=self.k_packed[b, h_kv],
-                    k_mag=self.k_mag[b, h_kv, :, 0],
-                    k_mean=self.k_mean[b, h_kv, :, 0],
-                    v_packed=self.v_packed[b, h_kv],
-                    v_mag=self.v_mag[b, h_kv, :, 0],
-                    v_mean=self.v_mean[b, h_kv, :, 0],
-                    centroids=self.centroids,
-                    rotation=self.rotation,
-                    seq_kv=seq_kv,
-                )
-                head_outputs.append(out)
-
-            outputs.append(torch.stack(head_outputs, dim=0))
-
-        return torch.stack(outputs, dim=0)  # (B, H_q, S_new, D)
+        return int4_attention_multihead(
+            q=q,
+            cache=self,
+            n_heads_q=n_heads,
+            rotation=self.rotation,
+            centroids=self.centroids,
+        )
