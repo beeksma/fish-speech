@@ -4,6 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Literal, Tuple
 
+import numpy as np
 import torch
 import torchaudio
 from loguru import logger
@@ -130,13 +131,15 @@ class ReferenceLoader:
 
         return prompt_tokens, prompt_texts
 
-    def load_audio(self, reference_audio: bytes | str, sr: int):
+    def load_audio(self, reference_audio: bytes | str, sr: int) -> np.ndarray:
         """
-        Load the audio data from a file or bytes.
+        Load the audio data from a file path or raw bytes.
         """
-        if len(reference_audio) > 255 or not Path(reference_audio).exists():
-            audio_data = reference_audio
-            reference_audio = io.BytesIO(audio_data)
+        if isinstance(reference_audio, bytes):
+            reference_audio = io.BytesIO(reference_audio)
+        elif not Path(reference_audio).exists():
+            # Treat as raw audio data in a string-like container
+            reference_audio = io.BytesIO(reference_audio)  # type: ignore[arg-type]
 
         if self._use_soundfile_directly:
             import soundfile
