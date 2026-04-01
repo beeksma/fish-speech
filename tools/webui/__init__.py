@@ -9,7 +9,7 @@ from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
 _VALID_THEMES = {"light", "dark"}
 
-_NONE_CHOICE = ""  # empty string = no reference selected
+_NONE_LABEL = "None"  # visible placeholder in dropdown
 
 
 def build_app(
@@ -18,11 +18,11 @@ def build_app(
     if theme not in _VALID_THEMES:
         theme = "light"
 
-    def refresh_references(current: str = _NONE_CHOICE) -> gr.update:
+    def refresh_references(current: str = _NONE_LABEL) -> gr.update:
         ids = list_references(api_url)
-        choices = [_NONE_CHOICE] + ids
+        choices = [_NONE_LABEL] + ids
         # Preserve current selection if it's still in the list
-        value = current if current in choices else _NONE_CHOICE
+        value = current if current in choices else _NONE_LABEL
         return gr.update(choices=choices, value=value)
 
     with gr.Blocks(theme=gr.themes.Base()) as app:
@@ -105,15 +105,15 @@ def build_app(
                             with gr.Row():
                                 reference_id = gr.Dropdown(
                                     label=i18n("Reference Voice"),
-                                    choices=[_NONE_CHOICE],
-                                    value=_NONE_CHOICE,
+                                    choices=[_NONE_LABEL],
+                                    value=_NONE_LABEL,
                                     allow_custom_value=True,
                                     info="Select a pre-loaded voice or type a custom ID",
                                 )
                                 refresh_btn = gr.Button(
-                                    value="\U0001f504",  # 🔄
+                                    value="Refresh",
                                     scale=0,
-                                    min_width=48,
+                                    min_width=80,
                                 )
 
                             with gr.Row():

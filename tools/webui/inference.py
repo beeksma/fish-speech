@@ -39,7 +39,7 @@ def inference_wrapper(
 
     payload = {
         "text": text,
-        "reference_id": reference_id if reference_id else None,
+        "reference_id": reference_id if reference_id and not reference_id.startswith("--") else None,
         "references": references,
         "max_new_tokens": int(max_new_tokens),
         "chunk_length": int(chunk_length),
@@ -86,7 +86,10 @@ def list_references(api_url: str) -> list[str]:
     """Fetch available reference voice IDs from the API server."""
     try:
         with httpx.Client(timeout=10) as client:
-            resp = client.get(f"{api_url}/v1/references/list")
+            resp = client.get(
+                f"{api_url}/v1/references/list",
+                headers={"Accept": "application/json"},
+            )
         if resp.status_code == 200:
             data = resp.json()
             return data.get("reference_ids", [])
