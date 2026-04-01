@@ -262,8 +262,6 @@ class ReferenceLoader:
         except Exception as e:
             # Clean up on failure
             if ref_dir.exists():
-                import shutil
-
                 shutil.rmtree(ref_dir)
             raise e
 
