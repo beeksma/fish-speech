@@ -208,3 +208,65 @@ class TurboQuantKVCache(nn.Module):
             v_deq = torch.nn.functional.pad(v_deq, (0, 0, 0, pad))
 
         return k_deq, v_deq
+
+    def store(
+        self, input_pos: torch.Tensor, k_val: torch.Tensor, v_val: torch.Tensor
+    ) -> None:
+        """Quantize and store K/V without dequantizing (kernel-path only)."""
+        assert input_pos.shape[0] == k_val.shape[2]
+
+        k_p, k_m, k_mu = self._quantize(k_val)
+        v_p, v_m, v_mu = self._quantize(v_val)
+
+        self.k_packed[:, :, input_pos] = k_p
+        self.v_packed[:, :, input_pos] = v_p
+        self.k_mag[:, :, input_pos] = k_m
+        self.v_mag[:, :, input_pos] = v_m
+        self.k_mean[:, :, input_pos] = k_mu
+        self.v_mean[:, :, input_pos] = v_mu
+
+        hw = int(input_pos.max().item()) + 1
+        self._seq_high_water = max(self._seq_high_water, hw)
+
+    def attend(
+        self, q: torch.Tensor, n_heads: int
+    ) -> torch.Tensor:
+        """Run INT4 attention kernel directly on compressed cache.
+
+        Args:
+            q: (B, n_heads, S_new, head_dim) query tensor
+            n_heads: total Q heads (for GQA expansion)
+
+        Returns:
+            (B, n_heads, S_new, head_dim) attention output
+        """
+        from fish_speech.kernels.int4_attention import int4_polar_attention
+
+        B, H_q, S_new, D = q.shape
+        H_kv = self.n_heads  # KV heads
+        heads_per_kv = H_q // H_kv
+        seq_kv = self._seq_high_water
+
+        outputs = []
+        for b in range(B):
+            head_outputs = []
+            for h_q in range(H_q):
+                h_kv = h_q // heads_per_kv  # GQA: map Q head → KV head
+
+                out = int4_polar_attention(
+                    q=q[b, h_q],  # (S_new, D)
+                    k_packed=self.k_packed[b, h_kv],
+                    k_mag=self.k_mag[b, h_kv, :, 0],
+                    k_mean=self.k_mean[b, h_kv, :, 0],
+                    v_packed=self.v_packed[b, h_kv],
+                    v_mag=self.v_mag[b, h_kv, :, 0],
+                    v_mean=self.v_mean[b, h_kv, :, 0],
+                    centroids=self.centroids,
+                    rotation=self.rotation,
+                    seq_kv=seq_kv,
+                )
+                head_outputs.append(out)
+
+            outputs.append(torch.stack(head_outputs, dim=0))
+
+        return torch.stack(outputs, dim=0)  # (B, H_q, S_new, D)
