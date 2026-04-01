@@ -36,15 +36,17 @@ def _pad_decode_truncate(model, codes, device, pad_multiple=DECODE_PAD_TO):
     else:
         padded = codes
 
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     with torch.no_grad():
         result = model.from_indices(padded[None])[0].squeeze()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    elapsed = time.perf_counter() - t0
 
     output_len = int(result.shape[-1] * seq_len / pad_to)
     result = result[..., :output_len]
-    elapsed = time.perf_counter() - t0
     return result, elapsed, seq_len, pad_to
 
 
@@ -176,9 +178,9 @@ class VQManager:
         proc.start()
         child_conn.close()
 
-        if not parent_conn.poll(timeout=180):
+        if not parent_conn.poll(timeout=60):
             proc.kill()
-            raise RuntimeError("Decoder subprocess timed out during init")
+            raise RuntimeError("Decoder subprocess timed out during init (60s)")
 
         msg = parent_conn.recv()
         if msg.get("status") != "ready":
@@ -192,7 +194,7 @@ class VQManager:
             f"sample_rate={msg['sample_rate']})"
         )
 
-    def shutdown_decoder_subprocess(self):
+    def shutdown_decoder_subprocess(self) -> None:
         """Gracefully shut down the decoder subprocess."""
         conn = self._decoder_conn
         proc = self._decoder_process
@@ -202,16 +204,17 @@ class VQManager:
         if conn is not None:
             try:
                 conn.send(None)
-            except Exception:
-                pass
+            except (OSError, BrokenPipeError, EOFError):
+                logger.debug("Could not send shutdown signal to decoder subprocess")
             try:
                 conn.close()
-            except Exception:
-                pass
+            except OSError:
+                logger.debug("Could not close decoder subprocess connection")
         if proc is not None:
             proc.join(timeout=10)
             if proc.is_alive():
                 proc.kill()
+                logger.warning(f"Force-killed decoder subprocess (pid={proc.pid})")
 
     def decode_vq_tokens(self, codes):
         logger.info(f"VQ features: {codes.shape}")
@@ -252,8 +255,8 @@ class VQManager:
         pad_mult = CHUNK_DECODE_PAD_TO if codes.shape[-1] <= CHUNK_DECODE_PAD_TO else DECODE_PAD_TO
         self._decoder_conn.send({"codes": codes.cpu().numpy(), "pad_multiple": pad_mult})
 
-        if not self._decoder_conn.poll(timeout=120):
-            raise RuntimeError("Decoder subprocess timed out")
+        if not self._decoder_conn.poll(timeout=30):
+            raise RuntimeError("Decoder subprocess timed out (30s)")
 
         response = self._decoder_conn.recv()
         if "error" in response:
