@@ -105,12 +105,15 @@ def save_reference(
                 f"{api_url}/v1/references/add",
                 data={"id": name.strip(), "text": text.strip()},
                 files={"audio": ("reference.wav", audio_bytes, "audio/wav")},
+                headers={"Accept": "application/json"},
             )
 
-        if resp.status_code == 409:
-            raise gr.Error(f"Voice '{name.strip()}' already exists")
         if resp.status_code != 200:
-            raise gr.Error(resp.text or f"API error {resp.status_code}")
+            try:
+                msg = resp.json().get("message", resp.text)
+            except Exception:
+                msg = resp.text or f"API error {resp.status_code}"
+            raise gr.Error(msg)
 
         gr.Info(f"Voice '{name.strip()}' saved successfully")
 
