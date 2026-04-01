@@ -90,19 +90,43 @@ def _decoder_subprocess_worker(
             if msg is None:
                 break
 
+            action = msg.get("action", "decode")
+
             try:
-                codes = torch.from_numpy(msg["codes"]).to(device=device)
-                pad_mult = msg.get("pad_multiple", DECODE_PAD_TO)
-                result, elapsed, seq_len, pad_to = _pad_decode_truncate(model, codes, device, pad_multiple=pad_mult)
-                audio_np = result.float().cpu().numpy()
-                logger.info(
-                    f"[decoder-subprocess] VQ decode: {elapsed:.3f}s "
-                    f"(padded {seq_len}->{pad_to} tokens)"
-                )
-                conn.send({"audio": audio_np})
+                if action == "encode":
+                    audio_np = msg["audio"]
+                    audio_len = msg["audio_length"]
+                    audios = torch.from_numpy(audio_np).to(
+                        device=device,
+                        dtype=next(model.parameters()).dtype,
+                    )[None, None, :]
+                    audio_lengths = torch.tensor(
+                        [audio_len], device=device, dtype=torch.long,
+                    )
+                    t0 = time.perf_counter()
+                    tokens = model.encode(audios, audio_lengths)[0][0]
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    elapsed = time.perf_counter() - t0
+                    logger.info(
+                        f"[decoder-subprocess] VQ encode: {elapsed:.3f}s "
+                        f"({tokens.shape} tokens)"
+                    )
+                    conn.send({"tokens": tokens.cpu().numpy()})
+
+                else:
+                    codes = torch.from_numpy(msg["codes"]).to(device=device)
+                    pad_mult = msg.get("pad_multiple", DECODE_PAD_TO)
+                    result, elapsed, seq_len, pad_to = _pad_decode_truncate(model, codes, device, pad_multiple=pad_mult)
+                    audio_np = result.float().cpu().numpy()
+                    logger.info(
+                        f"[decoder-subprocess] VQ decode: {elapsed:.3f}s "
+                        f"(padded {seq_len}->{pad_to} tokens)"
+                    )
+                    conn.send({"audio": audio_np})
 
             except Exception as e:
-                logger.error(f"[decoder-subprocess] Decode error: {traceback.format_exc()}")
+                logger.error(f"[decoder-subprocess] {action} error: {traceback.format_exc()}")
                 conn.send({"error": str(e)})
 
     except Exception as e:
@@ -232,6 +256,30 @@ class VQManager:
         logger.info(f"VQ decode (subprocess): {time.perf_counter() - t0:.3f}s")
         return torch.from_numpy(response["audio"])
 
+    def _encode_via_subprocess(self, audio_np, audio_length):
+        """Send audio to decoder subprocess for encoding, receive tokens."""
+        if not self._decoder_process.is_alive():
+            logger.error("Decoder subprocess died, falling back to in-process encode")
+            self.shutdown_decoder_subprocess()
+            return None  # caller will fall through to in-process path
+
+        t0 = time.perf_counter()
+        self._decoder_conn.send({
+            "action": "encode",
+            "audio": audio_np,
+            "audio_length": audio_length,
+        })
+
+        if not self._decoder_conn.poll(timeout=120):
+            raise RuntimeError("Decoder subprocess timed out during encode")
+
+        response = self._decoder_conn.recv()
+        if "error" in response:
+            raise RuntimeError(f"Decoder subprocess encode error: {response['error']}")
+
+        logger.info(f"VQ encode (subprocess): {time.perf_counter() - t0:.3f}s")
+        return torch.from_numpy(response["tokens"])
+
     def encode_reference(self, reference_audio, enable_reference_audio):
         if enable_reference_audio and reference_audio is not None:
             if hasattr(self.decoder_model, "spec_transform"):
@@ -240,15 +288,28 @@ class VQManager:
                 sample_rate = self.decoder_model.sample_rate
             reference_audio_content = self.load_audio(reference_audio, sample_rate)
 
+            logger.info(
+                f"Loaded audio with {len(reference_audio_content) / sample_rate:.2f} seconds"
+            )
+
+            # Route through subprocess when active — the subprocess has a
+            # clean HIP context with miopen-conv-fix, avoiding page faults
+            # from the parent process's corrupted HIP page tables on RDNA 4.
+            if self._decoder_conn is not None:
+                prompt_tokens = self._encode_via_subprocess(
+                    reference_audio_content, len(reference_audio_content),
+                )
+                if prompt_tokens is not None:
+                    logger.info(f"Encoded prompt: {prompt_tokens.shape}")
+                    return prompt_tokens
+                # Fall through to in-process if subprocess died
+
             audios = torch.from_numpy(reference_audio_content).to(
                 device=self.decoder_model.device,
                 dtype=next(self.decoder_model.parameters()).dtype,
             )[None, None, :]
             audio_lengths = torch.tensor(
                 [audios.shape[2]], device=self.decoder_model.device, dtype=torch.long
-            )
-            logger.info(
-                f"Loaded audio with {audios.shape[2] / sample_rate:.2f} seconds"
             )
 
             if isinstance(self.decoder_model, DAC):
