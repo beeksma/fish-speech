@@ -99,13 +99,22 @@ class API(ExceptionHandler):
         logger.info(f"Startup done, listening server at http://{self.args.listen}")
 
 
+_ALLOWED_ARGS = {
+    "mode", "llama_checkpoint_path", "decoder_checkpoint_path",
+    "decoder_config_name", "device", "half", "compile",
+    "max_text_length", "listen", "workers", "api_key",
+}
+
+
 def create_app():
     args_env = os.environ.get(ENV_ARGS_KEY)
     args = None
 
     if args_env:
         try:
-            args = Namespace(**json.loads(args_env))
+            raw = json.loads(args_env)
+            filtered = {k: v for k, v in raw.items() if k in _ALLOWED_ARGS}
+            args = Namespace(**filtered)
         except Exception as exc:
             logger.warning(f"Failed to load args from {ENV_ARGS_KEY}: {exc}")
 

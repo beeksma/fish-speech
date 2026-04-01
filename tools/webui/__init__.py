@@ -6,7 +6,13 @@ from fish_speech.i18n import i18n
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
 
+_VALID_THEMES = {"light", "dark"}
+
+
 def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
+    if theme not in _VALID_THEMES:
+        theme = "light"
+
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown(HEADER_MD)
 
@@ -14,8 +20,7 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
         app.load(
             None,
             None,
-            js="() => {const params = new URLSearchParams(window.location.search);if (!params.has('__theme')) {params.set('__theme', '%s');window.location.search = params.toString();}}"
-            % theme,
+            js=f"() => {{const params = new URLSearchParams(window.location.search);if (!params.has('__theme')) {{params.set('__theme', '{theme}');window.location.search = params.toString();}}}}"
         )
 
         # Inference
