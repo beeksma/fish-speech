@@ -1,15 +1,13 @@
 import base64
-import html
 import io
 from functools import partial
-from typing import Any, Callable
+from typing import Callable, Optional
 
+import gradio as gr
 import httpx
 import numpy as np
 import soundfile as sf
 from loguru import logger
-
-from fish_speech.i18n import i18n
 
 
 def inference_wrapper(
@@ -25,7 +23,7 @@ def inference_wrapper(
     seed,
     use_memory_cache,
     api_url,
-):
+) -> Optional[tuple[int, np.ndarray]]:
     """Call the Fish Speech API server for TTS inference."""
 
     references = []
@@ -39,7 +37,7 @@ def inference_wrapper(
 
     payload = {
         "text": text,
-        "reference_id": reference_id if reference_id and not reference_id.startswith("--") else None,
+        "reference_id": reference_id if reference_id and reference_id != "None" else None,
         "references": references,
         "max_new_tokens": int(max_new_tokens),
         "chunk_length": int(chunk_length),
@@ -57,29 +55,18 @@ def inference_wrapper(
             resp = client.post(f"{api_url}/v1/tts", json=payload)
 
         if resp.status_code != 200:
-            error_msg = resp.text or f"API error {resp.status_code}"
-            return None, build_html_error_message(error_msg)
+            raise gr.Error(resp.text or f"API error {resp.status_code}")
 
         audio_data, sample_rate = sf.read(io.BytesIO(resp.content))
-        return (sample_rate, audio_data.astype(np.float32)), None
+        return (sample_rate, audio_data.astype(np.float32))
 
+    except gr.Error:
+        raise
     except httpx.ConnectError:
-        return None, build_html_error_message(
-            "Cannot connect to API server. Is the server service running?"
-        )
+        raise gr.Error("Cannot connect to API server. Is the server service running?")
     except Exception as e:
         logger.error(f"TTS request failed: {e}")
-        return None, build_html_error_message(str(e))
-
-
-def build_html_error_message(error: Any) -> str:
-    error_str = str(error) if error is not None else "Unknown error"
-    return f"""
-    <div style="color: red;
-    font-weight: bold;">
-        {html.escape(error_str)}
-    </div>
-    """
+        raise gr.Error(str(e))
 
 
 def list_references(api_url: str) -> list[str]:

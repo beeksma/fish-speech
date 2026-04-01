@@ -137,25 +137,15 @@ def build_app(
                                 )
 
             with gr.Column(scale=3):
-                with gr.Row():
-                    error = gr.HTML(
-                        label=i18n("Error Message"),
-                        visible=True,
-                    )
-                with gr.Row():
-                    audio = gr.Audio(
-                        label=i18n("Generated Audio"),
-                        type="numpy",
-                        interactive=False,
-                        visible=True,
-                    )
-
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        generate = gr.Button(
-                            value="\U0001f3a7 " + i18n("Generate"),
-                            variant="primary",
-                        )
+                audio = gr.Audio(
+                    label=i18n("Generated Audio"),
+                    type="numpy",
+                    interactive=False,
+                )
+                generate = gr.Button(
+                    value="\U0001f3a7 " + i18n("Generate"),
+                    variant="primary",
+                )
 
         # Refresh reference list on button click (preserves current selection)
         refresh_btn.click(
@@ -183,7 +173,7 @@ def build_app(
                 seed,
                 use_memory_cache,
             ],
-            [audio, error],
+            [audio],
             concurrency_limit=1,
         )
 
