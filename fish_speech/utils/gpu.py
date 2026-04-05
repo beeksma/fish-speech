@@ -68,6 +68,27 @@ def triton_int4_kernel_safe() -> bool:
     _triton_int4_result = safe
     return safe
 
+def effective_kv_cache_bits() -> int:
+    """Determine the effective KV cache bit width from environment + hardware.
+
+    When KV_CACHE_BITS < 16 but the Triton INT4 kernel is unavailable (RDNA
+    consumer GPUs), the quantize → dequant → SDPA fallback path introduces
+    too much error for this TTS model, causing immediate im_end generation.
+    In that case, fall back to 16-bit KV cache automatically.
+    """
+    requested = int(os.environ.get("KV_CACHE_BITS", "16"))
+    if requested >= 16:
+        return requested
+    if triton_int4_kernel_safe():
+        return requested
+    logger.warning(
+        f"KV_CACHE_BITS={requested} requires the Triton INT4 kernel, which is "
+        f"unavailable on this GPU. Falling back to 16-bit KV cache. "
+        f"Reduce MAX_SEQ_LEN if memory is tight."
+    )
+    return 16
+
+
 # Approximate model memory requirements (in GB) for VRAM guidance.
 _MODEL_ESTIMATE_BF16 = 10.3
 _MODEL_ESTIMATE_INT8 = 5.1
@@ -140,7 +161,7 @@ def check_vram_and_advise(checkpoint_path: str):
 
     is_int8 = "int8" in str(checkpoint_path)
     max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "32768"))
-    kv_cache_bits = int(os.environ.get("KV_CACHE_BITS", "16"))
+    kv_cache_bits = effective_kv_cache_bits()
 
     model_gb = _MODEL_ESTIMATE_INT8 if is_int8 else _MODEL_ESTIMATE_BF16
     decoder_gb = _DECODER_ESTIMATE_BF16
