@@ -920,11 +920,13 @@ def launch_thread_safe_queue(
         model_ref[0] = model
 
         max_seq_len = int(os.environ.get("MAX_SEQ_LEN", model.config.max_seq_len))
+        kv_cache_bits = int(os.environ.get("KV_CACHE_BITS", "16"))
         with torch.device(device):
             model.setup_caches(
                 max_batch_size=1,
                 max_seq_len=max_seq_len,
                 dtype=next(model.parameters()).dtype,
+                kv_cache_bits=kv_cache_bits,
             )
 
         # Offload slow layers to CPU if requested (after caches are set up)
@@ -1072,11 +1074,13 @@ def main(
     model, decode_one_token = init_model(
         checkpoint_path, device, precision, compile=compile
     )
+    kv_cache_bits = int(os.environ.get("KV_CACHE_BITS", "16"))
     with torch.device(device):
         model.setup_caches(
             max_batch_size=1,
             max_seq_len=model.config.max_seq_len,
             dtype=next(model.parameters()).dtype,
+            kv_cache_bits=kv_cache_bits,
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()

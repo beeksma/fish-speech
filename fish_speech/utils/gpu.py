@@ -72,8 +72,9 @@ def apply_vram_fraction():
 def check_vram_and_advise(checkpoint_path: str):
     """Log VRAM guidance if the model may not fit.
 
-    Estimates memory usage based on whether INT8 quantization is active
-    and the configured MAX_SEQ_LEN, then compares against available VRAM.
+    Estimates memory usage based on whether INT8 quantization is active,
+    the configured MAX_SEQ_LEN and KV_CACHE_BITS, then compares against
+    available VRAM.
     """
     if not torch.cuda.is_available():
         return
@@ -83,11 +84,12 @@ def check_vram_and_advise(checkpoint_path: str):
 
     is_int8 = "int8" in str(checkpoint_path)
     max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "32768"))
+    kv_cache_bits = int(os.environ.get("KV_CACHE_BITS", "16"))
 
     model_gb = _MODEL_ESTIMATE_INT8 if is_int8 else _MODEL_ESTIMATE_BF16
     decoder_gb = _DECODER_ESTIMATE_BF16
-    # KV cache: ~1.2GB at 8192, scales linearly
-    kv_gb = (max_seq_len / 8192) * 1.2
+    # KV cache: ~1.2GB at 8192 seq_len with 16-bit, scales with seq_len and bit width
+    kv_gb = (max_seq_len / 8192) * 1.2 * (kv_cache_bits / 16)
     # Inference scratch/activations overhead
     overhead_gb = 0.5
 
@@ -97,7 +99,7 @@ def check_vram_and_advise(checkpoint_path: str):
         f"GPU: {props.name}, VRAM: {total_gb:.1f}GB | "
         f"Estimated usage: {estimated_gb:.1f}GB "
         f"(model={'INT8' if is_int8 else 'bf16'}, "
-        f"seq_len={max_seq_len}, decoder=bf16)"
+        f"seq_len={max_seq_len}, kv_cache={kv_cache_bits}bit, decoder=bf16)"
     )
 
     if estimated_gb > total_gb:
@@ -110,9 +112,14 @@ def check_vram_and_advise(checkpoint_path: str):
             )
         if max_seq_len > 4096:
             suggestions.append(
-                f"reduce MAX_SEQ_LEN (current: {max_seq_len}, try 4096 to save ~{(max_seq_len - 4096) / 8192 * 1.2:.1f}GB)"
+                f"reduce MAX_SEQ_LEN (current: {max_seq_len}, try 4096 to save ~{(max_seq_len - 4096) / 8192 * 1.2 * (kv_cache_bits / 16):.1f}GB)"
             )
-        suggestions.append("set OFFLOAD_WEIGHTS_TO_CPU=true to run slow layers on CPU")
+        if kv_cache_bits > 4:
+            suggestions.append(
+                f"set KV_CACHE_BITS=4 (current: {kv_cache_bits}, saves ~{kv_gb - kv_gb * 4 / kv_cache_bits:.1f}GB)"
+            )
+        if not is_int8:
+            suggestions.append("set OFFLOAD_WEIGHTS_TO_CPU=true to run slow layers on CPU (bf16 models only)")
         suggestions.append("set VRAM_FRACTION=0.95 to prevent system freeze on OOM")
 
         logger.warning(
