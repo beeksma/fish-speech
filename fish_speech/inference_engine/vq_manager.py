@@ -59,9 +59,9 @@ def _decoder_subprocess_worker(
 ):
     """Persistent subprocess that owns the DAC decoder in its own HIP context.
 
-    On RDNA 4 (gfx1201), MIOpen conv kernels page-fault after LLM generation
-    corrupts the parent process's HIP page tables. This subprocess gets a clean
-    HIP context that never touches LLM allocations.
+    On ROCm consumer GPUs (RDNA 3/4), MIOpen conv kernels page-fault after
+    LLM generation corrupts the parent process's HIP page tables. This
+    subprocess gets a clean HIP context that never touches LLM allocations.
     """
     import traceback
 
@@ -222,7 +222,7 @@ class VQManager:
         if self._decoder_conn is not None:
             return self._decode_via_subprocess(codes)
 
-        # In-process fallback (non-RDNA4 or subprocess not active)
+        # In-process fallback (CDNA data center GPUs or subprocess not active)
         if isinstance(self.decoder_model, DAC):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
